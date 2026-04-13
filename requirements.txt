@@ -1,3 +1,5 @@
 requests
 google-genai
 python-telegram-bot
+supabase
+pytz
