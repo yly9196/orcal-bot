@@ -59,6 +59,33 @@ def get_recent_history():
     except:
         return ""
 
+def execute_poly_order(token_id, price, size, side="BUY"):
+    """
+    חותם על פקודת הימור באמצעות המפתח הפרטי ושולח אותה ל-Orderbook של פולימרקט
+    """
+    try:
+        # אריזת הפקודה עם הנתונים הנדרשים
+        order_args = OrderArgs(
+            price=price, # מחיר ההימור (למשל 0.60 עבור 60%)
+            size=size,   # כמות המניות (כמה דולרים להשקיע)
+            side=side,
+            token_id=token_id, # ה-ID הייחודי של תשובת ה-"YES" או ה-"NO" בשוק הזה
+        )
+        
+        # חתימה קריפטוגרפית (L2 Signature)
+        signed_order = poly_client.create_order(order_args)
+        
+        # ירייה לשרת. FOK (Fill-Or-Kill) אומר: בצע הכל עכשיו, או תבטל.
+        resp = poly_client.post_order(signed_order, OrderType.FOK) 
+        
+        if resp and resp.get('success'):
+            return True, resp.get('orderID')
+        return False, resp.get('errorMsg', 'Unknown error from CLOB')
+        
+    except Exception as e:
+        print(f"L2 Signature Error: {e}")
+        return False, str(e)
+
 async def send_hourly_summary():
     """שולח דוח מנכ"ל שעתי על מצב התיק הווירטואלי"""
     try:
@@ -155,46 +182,35 @@ async def analyze_and_trade():
 
 async def main():
     global last_summary_hour
+    
+    # הפעלת השרת המדומה ברקע כדי ש-Render לא יכבה אותנו
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 בוט פולימרקט V1.5 באוויר - מצב למידה פעיל")
-
-def execute_poly_order(token_id, price, size, side="BUY"):
-    """
-    חותם על פקודת הימור באמצעות המפתח הפרטי ושולח אותה ל-Orderbook של פולימרקט
-    """
-    try:
-        # אריזת הפקודה עם הנתונים הנדרשים
-        order_args = OrderArgs(
-            price=price, # מחיר ההימור (למשל 0.60 עבור 60%)
-            size=size,   # כמות המניות (כמה דולרים להשקיע)
-            side=side,
-            token_id=token_id, # ה-ID הייחודי של תשובת ה-"YES" או ה-"NO" בשוק הזה
-        )
-        
-        # חתימה קריפטוגרפית (L2 Signature)
-        signed_order = poly_client.create_order(order_args)
-        
-        # ירייה לשרת. FOK (Fill-Or-Kill) אומר: בצע הכל עכשיו, או תבטל.
-        resp = poly_client.post_order(signed_order, OrderType.FOK) 
-        
-        if resp and resp.get('success'):
-            return True, resp.get('orderID')
-        return False, resp.get('errorMsg', 'Unknown error from CLOB')
-        
-    except Exception as e:
-        print(f"L2 Signature Error: {e}")
-        return False, str(e)
+    
+    # הודעת הדלקה לטלגרם
+    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.0 (L2 Signature Live) באוויר!")
     
     while True:
-        now = datetime.now()
-        
-        # בדיקת דוח שעתי
-        if now.minute == 0 and now.hour != last_summary_hour:
-            await send_hourly_summary()
-            last_summary_hour = now.hour
+        try:
+            now = datetime.now()
             
-        await analyze_and_trade()
-        await asyncio.sleep(600) # סריקה כל 10 דקות
+            # 1. בדיקת דוח שעתי
+            if now.minute == 0 and now.hour != last_summary_hour:
+                await send_hourly_summary()
+                last_summary_hour = now.hour
+                
+            # 2. סריקה, ניתוח וביצוע עסקאות (כל 10 דקות)
+            if now.minute % 10 == 0:
+                await analyze_and_trade()
+                
+        except Exception as e:
+            print(f"Main Loop Error: {e}")
+            
+        # המתנה של 60 שניות כדי לא להציף את השרת
+        await asyncio.sleep(60)
 
+# נקודת ההתחלה של הקובץ
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped manually.")
