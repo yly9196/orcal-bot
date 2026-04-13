@@ -3,92 +3,126 @@ import time
 import requests
 import asyncio
 import threading
+from datetime import datetime
 from http.server import SimpleHTTPRequestHandler
 from socketserver import TCPServer
 from google import genai
 from telegram import Bot
+from supabase import create_client
 
 # --- הגדרות ---
 TOKEN = "7504901310:AAG2370ybKrt0uplSVqHgadtiI_y6wt9hIM"
 CHAT_ID = "5539218542"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 AI_KEY = os.getenv("GEMINI_API_KEY")
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=AI_KEY)
 MODEL = 'models/gemini-3.1-pro-preview'
 tg_bot = Bot(token=TOKEN)
 
-# --- שרת דמיוני כדי להשתיק את Render ולאפשר ל-Uptime Robot לעבוד ---
+last_summary_hour = -1
+
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
-    try:
-        with TCPServer(("", port), SimpleHTTPRequestHandler) as httpd:
-            print(f"📡 שרת דמיוני מאזין בפורט {port}")
-            httpd.serve_forever()
-    except Exception as e:
-        print(f"שרת דמיוני נכשל (לא קריטי): {e}")
+    with TCPServer(("", port), SimpleHTTPRequestHandler) as httpd:
+        httpd.serve_forever()
 
-def get_polymarket_events():
-    """מושך אירועים חמים מפולימרקט"""
+def get_recent_history():
+    """שולף את 5 העסקאות האחרונות לצורך למידה"""
     try:
-        url = "https://clob.polymarket.com/markets"
-        # מושך את 10 האירועים הפעילים ביותר
-        r = requests.get(url, params={"active": "true", "limit": 10})
-        data = r.json()
-        return data if isinstance(data, list) else []
-    except Exception as e:
-        print(f"שגיאת API בפולימרקט: {e}")
-        return []
+        res = supabase.table("poly_trades1").select("*").order("created_at", desc=True).limit(5).execute()
+        if res.data:
+            history_text = "\n".join([f"- {t['question']}: מחיר {t['buy_price']}, סטטוס: {t['status']}" for t in res.data])
+            return f"\nהיסטוריית עסקאות אחרונה ללמידה:\n{history_text}"
+        return "\nאין היסטוריה קודמת. זו העסקה הראשונה."
+    except:
+        return ""
 
-async def analyze_and_report():
-    print(f"🔎 [{time.strftime('%H:%M:%S')}] סורק אירועים והזדמנויות...")
-    events = get_polymarket_events()
+async def send_hourly_summary():
+    """שולח דוח מנכ"ל שעתי על מצב התיק הווירטואלי"""
+    try:
+        res_config = supabase.table("poly_config").select("balance").eq("id", 1).execute()
+        balance = res_config.data[0]['balance'] if res_config.data else 10000.0
+        
+        res_trades = supabase.table("poly_trades1").select("*", count="exact").eq("status", "OPEN").execute()
+        active_trades = res_trades.count if res_trades.count is not None else 0
+        
+        msg = f"📊 **סיכום שעתי - תיק פולימרקט**\n\n"
+        msg += f"🏦 יתרה וירטואלית: {balance:.1f}$ USDC\n"
+        msg += f"📈 עסקאות פעילות בסימולציה: {active_trades}\n"
+        msg += f"🕒 זמן דיווח: {datetime.now().strftime('%H:00')}\n"
+        msg += f"\nהמערכת ממשיכה לסרוק חדשות וללמוד מהביצועים."
+        
+        await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
+    except Exception as e:
+        print(f"שגיאה בהפקת דוח שעתי: {e}")
+
+async def analyze_and_trade():
+    print(f"🔎 [{time.strftime('%H:%M:%S')}] סורק הזדמנויות ולומד מהיסטוריה...")
+    
+    # משיכת נתונים ללמידה
+    history_context = get_recent_history()
+    
+    res_config = supabase.table("poly_config").select("balance").execute()
+    balance = res_config.data[0]['balance'] if res_config.data else 10000.0
+    
+    url = "https://clob.polymarket.com/markets"
+    events = requests.get(url, params={"active": "true", "limit": 10}).json()
     
     for e in events:
         if not isinstance(e, dict): continue
-        
         question = e.get('question')
         prices = e.get('outcome_prices', [0, 0])
-        
-        try:
-            current_odds = float(prices[0]) * 100 if prices else 0
-        except:
-            current_odds = 0
+        price = float(prices[0]) if prices else 0
 
-        if question:
-            # ה-AI סורק חדשות בזמן אמת ומנתח
+        if question and price > 0:
             prompt = f"""
-            נתח את האירוע הבא מפולימרקט: '{question}'. 
-            המחיר הנוכחי בשוק משקף סיכוי של {current_odds:.1f}%.
-            חפש חדשות מהדקות האחרונות וקבע:
-            1. האם הסיכוי האמיתי גבוה משמעותית ממחיר השוק?
-            2. אם כן, רשום 'BUY' והסבר למה. אם לא, רשום 'SKIP'.
-            ענה בקצרה ובעברית.
+            אתה אנליסט פולימרקט בעל יכולת למידה.
+            {history_context}
+            
+            האירוע הנוכחי: '{question}'
+            מחיר שוק: {price*100:.1f}%
+            
+            בהתבסס על ההיסטוריה שלך וחדשות עדכניות, האם זו הזדמנות BUY?
+            ענה בפורמט:
+            החלטה: [BUY/SKIP]
+            הסבר למידה: [למה זה דומה או שונה מהצלחות קודמות?]
             """
             try:
                 res = ai_client.models.generate_content(model=MODEL, contents=prompt)
                 analysis = res.text
                 
-                # שולח התראה רק אם יש המלצת קנייה ברורה
-                if "BUY" in analysis.upper():
-                    msg = f"🎯 **הזדמנות פולימרקט מזוהה!**\n\n📌 שאלה: {question}\n📊 סיכוי שוק: {current_odds:.1f}%\n🧠 ניתוח AI:\n{analysis}"
+                if "BUY" in analysis.upper() and balance >= 500:
+                    trade_amount = 500
+                    balance -= trade_amount
+                    
+                    supabase.table("poly_trades1").insert({
+                        "question": question, "buy_price": price, "amount": trade_amount, "status": "OPEN"
+                    }).execute()
+                    
+                    supabase.table("poly_config").upsert({"id": 1, "balance": balance}).execute()
+
+                    msg = f"📈 **עסקה וירטואלית חדשה (בוט לומד)**\n\n📌 {question}\n💰 מחיר: {price*100:.1f}%\n🧠 **תובנת למידה:**\n{analysis}"
                     await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
-                    print(f"✅ נשלחה התראה על: {question}")
-            except Exception as ai_err:
-                print(f"שגיאת AI: {ai_err}")
-                continue
+            except: continue
 
 async def main():
-    # הפעלת השרת הדמיוני ב-Thread נפרד
+    global last_summary_hour
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    
-    await tg_bot.send_message(chat_id=CHAT_ID, text="🚀 בוט פולימרקט V1.3 באוויר!\nסריקה חדשותית מופעלת בכל 10 דקות.")
+    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 בוט פולימרקט V1.5 באוויר - מצב למידה פעיל")
     
     while True:
-        await analyze_and_report()
-        print("😴 ממתין 10 דקות לסריקה הבאה...")
-        await asyncio.sleep(600) # 10 דקות
+        now = datetime.now()
+        
+        # בדיקת דוח שעתי
+        if now.minute == 0 and now.hour != last_summary_hour:
+            await send_hourly_summary()
+            last_summary_hour = now.hour
+            
+        await analyze_and_trade()
+        await asyncio.sleep(600) # סריקה כל 10 דקות
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("הבוט נעצר.")
+    asyncio.run(main())
