@@ -9,6 +9,25 @@ from socketserver import TCPServer
 from google import genai
 from telegram import Bot
 from supabase import create_client
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import OrderArgs, OrderType
+
+# --- הגדרות L2 של פולימרקט ---
+# חובה: המפתח הפרטי של ארנק הפוליגון שלך (להכניס רק דרך Render Env Vars!)
+POLY_PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY") 
+HOST = "https://clob.polymarket.com"
+CHAIN_ID = 137 # רשת Polygon Mainnet
+
+try:
+    # אתחול הלקוח שמדבר עם הבלוקצ'יין
+    poly_client = ClobClient(HOST, key=POLY_PRIVATE_KEY, chain_id=CHAIN_ID)
+    
+    # זה משפט המחץ: יצירת מפתחות ה-API הנגזרים שמאפשרים לבוט לחתום אוטומטית
+    creds = poly_client.create_or_derive_api_creds()
+    poly_client.set_api_creds(creds)
+    print("✅ L2 Authentication Successful! The bot can now sign orders.")
+except Exception as e:
+    print(f"⚠️ Polymarket Auth Error: {e}")
 
 # --- הגדרות ---
 TOKEN = "7504901310:AAG2370ybKrt0uplSVqHgadtiI_y6wt9hIM"
@@ -62,28 +81,36 @@ async def send_hourly_summary():
 async def analyze_and_trade():
     print(f"🔎 [{time.strftime('%H:%M:%S')}] סורק הזדמנויות ולומד מהיסטוריה...")
     
-    # משיכת נתונים ללמידה
+    # משיכת נתונים ללמידה מהעסקאות הקודמות
     history_context = get_recent_history()
     
+    # בדיקת יתרה נוכחית מהקונפיג
     res_config = supabase.table("poly_config").select("balance").execute()
     balance = res_config.data[0]['balance'] if res_config.data else 10000.0
     
+    # משיכת שווקים פעילים מה-CLOB
     url = "https://clob.polymarket.com/markets"
     events = requests.get(url, params={"active": "true", "limit": 10}).json()
     
     for e in events:
         if not isinstance(e, dict): continue
         question = e.get('question')
+        
+        # --- שדרוג: שליפת token_id לחתימה ---
+        tokens = e.get('tokens', [])
+        if not tokens: continue
+        token_id = tokens[0].get('token_id') # YES token לרוב באינדקס 0
+        
         prices = e.get('outcome_prices', [0, 0])
         price = float(prices[0]) if prices else 0
 
-        if question and price > 0:
+        if question and price > 0 and token_id:
             prompt = f"""
-            אתה אנליסט פולימרקט בעל יכולת למידה.
+            אתה אנליסט פולימרקט בעל יכולת למידה עמוקה.
             {history_context}
             
             האירוע הנוכחי: '{question}'
-            מחיר שוק: {price*100:.1f}%
+            מחיר שוק (הסתברות): {price*100:.1f}%
             
             בהתבסס על ההיסטוריה שלך וחדשות עדכניות, האם זו הזדמנות BUY?
             ענה בפורמט:
@@ -94,24 +121,69 @@ async def analyze_and_trade():
                 res = ai_client.models.generate_content(model=MODEL, contents=prompt)
                 analysis = res.text
                 
+                # אם ה-AI אישר ויש מספיק יתרה
                 if "BUY" in analysis.upper() and balance >= 500:
-                    trade_amount = 500
-                    balance -= trade_amount
+                    trade_amount = 500 # כאן אפשר לשלב את מחשבון קלי למטה
                     
-                    supabase.table("poly_trades1").insert({
-                        "question": question, "buy_price": price, "amount": trade_amount, "status": "OPEN"
-                    }).execute()
+                    # --- המעבר ללייב: חתימה ושליחת פקודה ל-CLOB ---
+                    success, result = execute_poly_order(token_id, price, trade_amount)
                     
-                    supabase.table("poly_config").upsert({"id": 1, "balance": balance}).execute()
+                    if success:
+                        balance -= trade_amount
+                        
+                        # שמירה לזיכרון ב-Supabase עם מזהה הפקודה האמיתי
+                        supabase.table("poly_trades1").insert({
+                            "question": question, 
+                            "token_id": token_id,
+                            "buy_price": price, 
+                            "amount": trade_amount, 
+                            "status": "OPEN",
+                            "order_id": result # orderID שחזר מפולימרקט
+                        }).execute()
+                        
+                        # עדכון היתרה בקונפיג
+                        supabase.table("poly_config").upsert({"id": 1, "balance": balance}).execute()
 
-                    msg = f"📈 **עסקה וירטואלית חדשה (בוט לומד)**\n\n📌 {question}\n💰 מחיר: {price*100:.1f}%\n🧠 **תובנת למידה:**\n{analysis}"
-                    await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
-            except: continue
+                        msg = f"⚡ **עסקה חיה בוצעה (חתימת L2)!**\n\n📌 {question}\n💰 מחיר קנייה: {price*100:.1f}%\n🆔 מזהה פקודה: `{result}`\n🧠 **תובנת למידה:**\n{analysis}"
+                        await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
+                    else:
+                        print(f"❌ שגיאת חתימה/ביצוע עבור {question}: {result}")
+                        
+            except Exception as ex:
+                print(f"Error analyzing {question}: {ex}")
+                continue
 
 async def main():
     global last_summary_hour
     threading.Thread(target=run_dummy_server, daemon=True).start()
     await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 בוט פולימרקט V1.5 באוויר - מצב למידה פעיל")
+
+def execute_poly_order(token_id, price, size, side="BUY"):
+    """
+    חותם על פקודת הימור באמצעות המפתח הפרטי ושולח אותה ל-Orderbook של פולימרקט
+    """
+    try:
+        # אריזת הפקודה עם הנתונים הנדרשים
+        order_args = OrderArgs(
+            price=price, # מחיר ההימור (למשל 0.60 עבור 60%)
+            size=size,   # כמות המניות (כמה דולרים להשקיע)
+            side=side,
+            token_id=token_id, # ה-ID הייחודי של תשובת ה-"YES" או ה-"NO" בשוק הזה
+        )
+        
+        # חתימה קריפטוגרפית (L2 Signature)
+        signed_order = poly_client.create_order(order_args)
+        
+        # ירייה לשרת. FOK (Fill-Or-Kill) אומר: בצע הכל עכשיו, או תבטל.
+        resp = poly_client.post_order(signed_order, OrderType.FOK) 
+        
+        if resp and resp.get('success'):
+            return True, resp.get('orderID')
+        return False, resp.get('errorMsg', 'Unknown error from CLOB')
+        
+    except Exception as e:
+        print(f"L2 Signature Error: {e}")
+        return False, str(e)
     
     while True:
         now = datetime.now()
