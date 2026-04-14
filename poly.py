@@ -3,53 +3,53 @@ import time
 import requests
 import asyncio
 import threading
+import pytz
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler
 from socketserver import TCPServer
-from google import genai
 from telegram import Bot
 from supabase import create_client
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 
-# --- הגדרות L2 של פולימרקט ---
-# חובה: המפתח הפרטי של ארנק הפוליגון שלך (להכניס רק דרך Render Env Vars!)
+# ==========================================
+# 🌐 הגדרות L2 של פולימרקט
+# ==========================================
 POLY_PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY") 
 HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137 # רשת Polygon Mainnet
 
 try:
-    # אתחול הלקוח שמדבר עם הבלוקצ'יין
     poly_client = ClobClient(HOST, key=POLY_PRIVATE_KEY, chain_id=CHAIN_ID)
-    
-    # זה משפט המחץ: יצירת מפתחות ה-API הנגזרים שמאפשרים לבוט לחתום אוטומטית
     creds = poly_client.create_or_derive_api_creds()
     poly_client.set_api_creds(creds)
     print("✅ L2 Authentication Successful! The bot can now sign orders.")
 except Exception as e:
     print(f"⚠️ Polymarket Auth Error: {e}")
 
-# --- הגדרות ---
-TOKEN = "7504901310:AAG2370ybKrt0uplSVqHgadtiI_y6wt9hIM"
-CHAT_ID = "5539218542"
+# ==========================================
+# 🔑 מפתחות והגדרות מאובטחות
+# ==========================================
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') 
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') 
+GROQ_API_KEY = os.getenv('GROQ_API_KEY') 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-AI_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-ai_client = genai.Client(api_key=AI_KEY)
-MODEL = 'models/gemini-3.1-pro-preview'
 tg_bot = Bot(token=TOKEN)
-
+israel_tz = pytz.timezone('Asia/Jerusalem')
 last_summary_hour = -1
 
+# ==========================================
+# ⚙️ שרת מדומה ומערכות עזר
+# ==========================================
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     with TCPServer(("", port), SimpleHTTPRequestHandler) as httpd:
         httpd.serve_forever()
 
 def get_recent_history():
-    """שולף את 5 העסקאות האחרונות לצורך למידה"""
     try:
         res = supabase.table("poly_trades1").select("*").order("created_at", desc=True).limit(5).execute()
         if res.data:
@@ -60,34 +60,36 @@ def get_recent_history():
         return ""
 
 def execute_poly_order(token_id, price, size, side="BUY"):
-    """
-    חותם על פקודת הימור באמצעות המפתח הפרטי ושולח אותה ל-Orderbook של פולימרקט
-    """
     try:
-        # אריזת הפקודה עם הנתונים הנדרשים
-        order_args = OrderArgs(
-            price=price, # מחיר ההימור (למשל 0.60 עבור 60%)
-            size=size,   # כמות המניות (כמה דולרים להשקיע)
-            side=side,
-            token_id=token_id, # ה-ID הייחודי של תשובת ה-"YES" או ה-"NO" בשוק הזה
-        )
-        
-        # חתימה קריפטוגרפית (L2 Signature)
+        order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id)
         signed_order = poly_client.create_order(order_args)
-        
-        # ירייה לשרת. FOK (Fill-Or-Kill) אומר: בצע הכל עכשיו, או תבטל.
         resp = poly_client.post_order(signed_order, OrderType.FOK) 
         
-        if resp and resp.get('success'):
-            return True, resp.get('orderID')
+        if resp and resp.get('success'): return True, resp.get('orderID')
         return False, resp.get('errorMsg', 'Unknown error from CLOB')
-        
     except Exception as e:
-        print(f"L2 Signature Error: {e}")
         return False, str(e)
 
+# ==========================================
+# 🧠 המוח של פולימרקט (Groq Llama-3)
+# ==========================================
+def analyze_with_groq(prompt):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "llama3-70b-8192", 
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": 150
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        return response.json()['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        print(f"Groq Error: {e}")
+        return "ERROR"
+
 async def send_hourly_summary():
-    """שולח דוח מנכ"ל שעתי על מצב התיק הווירטואלי"""
     try:
         res_config = supabase.table("poly_config").select("balance").eq("id", 1).execute()
         balance = res_config.data[0]['balance'] if res_config.data else 10000.0
@@ -95,38 +97,37 @@ async def send_hourly_summary():
         res_trades = supabase.table("poly_trades1").select("*", count="exact").eq("status", "OPEN").execute()
         active_trades = res_trades.count if res_trades.count is not None else 0
         
-        msg = f"📊 **סיכום שעתי - תיק פולימרקט**\n\n"
-        msg += f"🏦 יתרה וירטואלית: {balance:.1f}$ USDC\n"
-        msg += f"📈 עסקאות פעילות בסימולציה: {active_trades}\n"
-        msg += f"🕒 זמן דיווח: {datetime.now().strftime('%H:00')}\n"
-        msg += f"\nהמערכת ממשיכה לסרוק חדשות וללמוד מהביצועים."
-        
+        msg = f"📊 **סיכום שעתי - פולימרקט**\n\n🏦 יתרה וירטואלית: {balance:.1f}$ USDC\n📈 עסקאות פעילות: {active_trades}\n🕒 זמן: {datetime.now(israel_tz).strftime('%H:00')}\n\nהמערכת ממשיכה לסרוק..."
         await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
     except Exception as e:
         print(f"שגיאה בהפקת דוח שעתי: {e}")
 
 async def analyze_and_trade():
-    print(f"🔎 [{time.strftime('%H:%M:%S')}] סורק הזדמנויות ולומד מהיסטוריה...")
+    now_str = datetime.now(israel_tz).strftime('%H:%M:%S')
+    print(f"🔎 [{now_str}] סורק הזדמנויות ב-Polymarket...")
     
-    # משיכת נתונים ללמידה מהעסקאות הקודמות
     history_context = get_recent_history()
     
-    # בדיקת יתרה נוכחית מהקונפיג
-    res_config = supabase.table("poly_config").select("balance").execute()
-    balance = res_config.data[0]['balance'] if res_config.data else 10000.0
+    try:
+        res_config = supabase.table("poly_config").select("balance").eq("id", 1).execute()
+        balance = res_config.data[0]['balance'] if res_config.data else 10000.0
+    except: balance = 10000.0
     
-    # משיכת שווקים פעילים מה-CLOB
-    url = "https://clob.polymarket.com/markets"
-    events = requests.get(url, params={"active": "true", "limit": 10}).json()
+    try:
+        url = "https://clob.polymarket.com/markets"
+        # ⚠️ התיקון הקריטי: חילוץ הרשימה מתוך מפתח ה-data
+        response = requests.get(url, params={"active": "true", "limit": 10}).json()
+        events = response.get('data', []) if isinstance(response, dict) else response
+    except Exception as e:
+        print(f"Error fetching markets: {e}")
+        return
     
     for e in events:
         if not isinstance(e, dict): continue
         question = e.get('question')
-        
-        # --- שדרוג: שליפת token_id לחתימה ---
         tokens = e.get('tokens', [])
         if not tokens: continue
-        token_id = tokens[0].get('token_id') # YES token לרוב באינדקס 0
+        token_id = tokens[0].get('token_id') 
         
         prices = e.get('outcome_prices', [0, 0])
         price = float(prices[0]) if prices else 0
@@ -144,73 +145,55 @@ async def analyze_and_trade():
             החלטה: [BUY/SKIP]
             הסבר למידה: [למה זה דומה או שונה מהצלחות קודמות?]
             """
-            try:
-                res = ai_client.models.generate_content(model=MODEL, contents=prompt)
-                analysis = res.text
+            
+            analysis = analyze_with_groq(prompt)
+            
+            # אם יש אישור קנייה ויתרה מספקת
+            if analysis != "ERROR" and "BUY" in analysis.upper() and balance >= 50:
+                trade_amount = 50 # מוגדר ל-50 דולר לעסקה בסימולציה/טסט
                 
-                # אם ה-AI אישר ויש מספיק יתרה
-                if "BUY" in analysis.upper() and balance >= 500:
-                    trade_amount = 500 # כאן אפשר לשלב את מחשבון קלי למטה
-                    
-                    # --- המעבר ללייב: חתימה ושליחת פקודה ל-CLOB ---
-                    success, result = execute_poly_order(token_id, price, trade_amount)
-                    
-                    if success:
-                        balance -= trade_amount
-                        
-                        # שמירה לזיכרון ב-Supabase עם מזהה הפקודה האמיתי
+                success, result = execute_poly_order(token_id, price, trade_amount)
+                
+                if success:
+                    balance -= trade_amount
+                    try:
                         supabase.table("poly_trades1").insert({
-                            "question": question, 
-                            "token_id": token_id,
-                            "buy_price": price, 
-                            "amount": trade_amount, 
-                            "status": "OPEN",
-                            "order_id": result # orderID שחזר מפולימרקט
+                            "question": question, "token_id": token_id,
+                            "buy_price": price, "amount": trade_amount, 
+                            "status": "OPEN", "order_id": result 
                         }).execute()
-                        
-                        # עדכון היתרה בקונפיג
                         supabase.table("poly_config").upsert({"id": 1, "balance": balance}).execute()
+                    except: pass
 
-                        msg = f"⚡ **עסקה חיה בוצעה (חתימת L2)!**\n\n📌 {question}\n💰 מחיר קנייה: {price*100:.1f}%\n🆔 מזהה פקודה: `{result}`\n🧠 **תובנת למידה:**\n{analysis}"
-                        await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
-                    else:
-                        print(f"❌ שגיאת חתימה/ביצוע עבור {question}: {result}")
-                        
-            except Exception as ex:
-                print(f"Error analyzing {question}: {ex}")
-                continue
+                    msg = f"⚡ **עסקה חיה בפולימרקט (L2)!**\n\n📌 {question}\n💰 מחיר: {price*100:.1f}%\n💵 השקעה: ${trade_amount}\n🆔 מזהה: `{result}`\n\n🧠 **תובנת למידה:**\n{analysis}"
+                    await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
+                else:
+                    print(f"❌ שגיאת ביצוע עבור {question}: {result}")
 
+# ==========================================
+# 🚀 הלולאה הראשית
+# ==========================================
 async def main():
     global last_summary_hour
-    
-    # הפעלת השרת המדומה ברקע כדי ש-Render לא יכבה אותנו
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    
-    # הודעת הדלקה לטלגרם
-    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.0 (L2 Signature Live) באוויר!")
+    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.0 (Groq Llama-3 + L2 Live) באוויר!")
     
     while True:
         try:
-            now = datetime.now()
-            
-            # 1. בדיקת דוח שעתי
+            now = datetime.now(israel_tz)
             if now.minute == 0 and now.hour != last_summary_hour:
                 await send_hourly_summary()
                 last_summary_hour = now.hour
                 
-            # 2. סריקה, ניתוח וביצוע עסקאות (כל 10 דקות)
             if now.minute % 10 == 0:
                 await analyze_and_trade()
                 
         except Exception as e:
             print(f"Main Loop Error: {e}")
             
-        # המתנה של 60 שניות כדי לא להציף את השרת
         await asyncio.sleep(60)
 
-# נקודת ההתחלה של הקובץ
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Bot stopped manually.")
+    try: asyncio.run(main())
+    except KeyboardInterrupt: print("Bot stopped.")
+
