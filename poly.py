@@ -109,19 +109,22 @@ def run_dummy_server():
         httpd.serve_forever()
 
 def get_global_news_flash():
+    """סריקת חדשות פיננסיות וקריפטו בלבד (הכנה לצלף)"""
     sources = [
-        "https://www.reutersagency.com/feed/?best-topics=political-news",
-        "https://cointelegraph.com/rss",
-        "https://www.zerohedge.com/feed",
-        "https://news.google.com/rss/search?q=crypto+polymarket&hl=en-US&gl=US"
+        "https://cointelegraph.com/rss",          # קריפטו וביטקוין
+        "https://cryptoslate.com/feed/",          # קריפטו
+        "https://www.cnbc.com/id/10000664/device/rss/rss.html", # פיננסים ומניות
+        "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml", # וול סטריט ג'ורנל
     ]
     all_headlines = []
     for url in sources:
         try:
             feed = feedparser.parse(url)
-            if feed.entries: all_headlines.append(f"- {feed.entries[0].title}")
+            # ניקח 2 כותרות מכל מקור כדי לקבל תמונה רחבה על הכלכלה
+            for entry in feed.entries[:2]:
+                all_headlines.append(f"- {entry.title}")
         except: continue
-    return "\n".join(all_headlines) if all_headlines else "No fresh news found."
+    return "\n".join(all_headlines) if all_headlines else "No fresh financial news."
 
 # ==========================================
 # 🧠 המוח של פולימרקט (שוחזר)
@@ -323,6 +326,7 @@ async def send_live_dashboard():
 # 🧠 ניתוח ראשית (שילוב לוגיקה)
 # ==========================================
 async def analyze_and_trade():
+    """מנוע צלף: מתביית רק על שווקי קריפטו ומאקרו-כלכלה"""
     today = datetime.now().date().isoformat()
     res_today = supabase.table("poly_trades1").select("*").gte("created_at", today).execute()
     if len(res_today.data) >= RiskConfig.MAX_DAILY_TRADES: return
@@ -331,37 +335,55 @@ async def analyze_and_trade():
     balance = get_balance()
     
     try:
-        response = requests.get("https://clob.polymarket.com/markets", params={"active": "true", "limit": 30}).json()
+        # סורקים 100 שווקים כדי שיהיה ממה לסנן
+        response = requests.get("https://clob.polymarket.com/markets", params={"active": "true", "limit": 100}).json()
         events = response.get('data', [])
     except: return
+    
+    # הראדאר: הבוט יחפש רק שאלות עם המילים האלו
+    target_keywords = [
+        "bitcoin", "btc", "s&p", "spx", "nasdaq", "dow", 
+        "fed", "interest rate", "inflation", "stock", "recession", "etf"
+    ]
     
     for event in events:
         question = event.get('question')
         if not question: continue
         
+        # סינון ה"צלף" - האם השוק קשור לביטקוין או למניות?
+        question_lower = question.lower()
+        if not any(keyword in question_lower for keyword in target_keywords):
+            continue # השוק לא מעניין אותנו, מדלגים בשקט
+            
         yes_price, no_price = get_correct_prices(event)
         price = yes_price
         
-        # 🔥 התיקון: מדלגים בשקט לחלוטין על שווקים "מתים" או פתורים
+        # סינון שווקים מתים
         if price <= 0.0 or price >= 1.0:
             continue
             
         side = "BUY"
         
-        prompt = f"""אתה אנליסט פולימרקט מקצועי.
-        חדשות: {current_news[:500]}
-        שוק: {question}
-        מחיר (YES): {price*100:.1f}%
+        prompt = f"""אתה אנליסט מאקרו-כלכלה וקריפטו בכיר בוול סטריט.
+        אתה מחפש הזדמנויות הימור בשווקי פולימרקט שקשורים אך ורק לביטקוין ולשוק ההון.
         
-        החלט אם יש פה הזדמנות ערך חיובי.
+        חדשות כלכליות מהשעות האחרונות:
+        {current_news[:800]}
+        
+        השוק הנבדק כעת: {question}
+        מחיר (הסתברות נוכחית שזה יקרה): {price*100:.1f}%
+        
+        האם החדשות הכלכליות תומכות בסבירות שהאירוע הזה יקרה?
         החלטה: [BUY/SKIP]
         ביטחון: [1-10]
-        הסבר: [קצר]"""
+        הסבר: [משפט קצר ומקצועי]"""
         
         analysis = analyze_with_groq(prompt)
         if "BUY" in analysis.upper():
             conf = extract_confidence_from_analysis(analysis)
             ev = calculate_ev(price, conf / 10)
+            
+            # כניסה לעסקה אם התוחלת חיובית
             if ev > 0.05:
                 await execute_trade_with_risk_management(event['tokens'][0]['token_id'], question, price, side, conf, balance)
 
