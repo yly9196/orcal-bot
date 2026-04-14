@@ -4,3 +4,4 @@ python-telegram-bot
 supabase
 pytz
 py_clob_client
+feedparser
