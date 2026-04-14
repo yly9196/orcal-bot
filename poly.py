@@ -102,7 +102,7 @@ def execute_poly_order(token_id, price, size, side="BUY"):
         return False, str(e)
 
 # ==========================================
-# 🧠 המוח של פולימרקט (Groq Llama-3)
+# 🧠 המוח של פולימרקט (Groq Llama-3 - מצב אגרסיבי)
 # ==========================================
 def analyze_with_groq(prompt):
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -110,7 +110,7 @@ def analyze_with_groq(prompt):
     payload = {
         "model": "llama3-70b-8192", 
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        "temperature": 0.4, # הועלה קצת כדי לאפשר חשיבה יצירתית יותר
         "max_tokens": 150
     }
     try:
@@ -128,21 +128,22 @@ async def send_hourly_summary():
         res_trades = supabase.table("poly_trades1").select("*", count="exact").eq("status", "OPEN").execute()
         active_trades = res_trades.count if res_trades.count is not None else 0
         
-        msg = f"📊 **סיכום שעתי - פולימרקט**\n\n🏦 יתרה וירטואלית: {balance:.1f}$ USDC\n📈 עסקאות פעילות: {active_trades}\n🕒 זמן: {datetime.now(israel_tz).strftime('%H:00')}\n\nהמערכת ממשיכה לסרוק..."
+        msg = f"📊 **סיכום שעתי - פולימרקט**\n\n🏦 יתרה וירטואלית: {balance:.1f}$ USDC\n📈 עסקאות פעילות: {active_trades}\n🕒 זמן: {datetime.now(israel_tz).strftime('%H:00')}\n\nהמערכת סורקת במצב אגרסיבי..."
         await tg_bot.send_message(chat_id=CHAT_ID, text=msg)
     except Exception as e:
         print(f"שגיאה בהפקת דוח שעתי: {e}")
 
 async def analyze_and_trade():
     now_str = datetime.now(israel_tz).strftime('%H:%M:%S')
-    print(f"🔎 [{now_str}] סורק שווקים ומצליב עם 10 מקורות חדשות...")
+    print(f"🔎 [{now_str}] סורק שווקים (רדיוס מורחב) ומצליב עם 10 מקורות חדשות...")
     
     current_news = get_global_news_flash()
     history_context = get_recent_history()
     
     try:
         url = "https://clob.polymarket.com/markets"
-        response = requests.get(url, params={"active": "true", "limit": 15}).json()
+        # הגדלנו את רדיוס הסריקה ל-30 שווקים כדי לתת לו יותר אפשרויות בחירה
+        response = requests.get(url, params={"active": "true", "limit": 30}).json()
         events = response.get('data', [])
     except: return
     
@@ -157,7 +158,7 @@ async def analyze_and_trade():
 
         if question and price > 0:
             prompt = f"""
-            אתה אנליסט פולימרקט בכיר.
+            אתה אנליסט פולימרקט אגרסיבי שמחפש הזדמנויות מסחר פוטנציאליות.
             
             חדשות אחרונות מהעולם (10 מקורות):
             {current_news}
@@ -167,14 +168,14 @@ async def analyze_and_trade():
             השוק לבדיקה: '{question}'
             מחיר נוכחי: {price*100:.1f}% (הסתברות)
             
-            משימה:
-            האם בהתבסס על החדשות הטריות ביותר, המחיר בשוק משקף את המציאות?
-            אם החדשות תומכות באירוע והמחיר עדיין נמוך - זה BUY.
-            אם החדשות סותרות או שאין קשר ישיר - זה SKIP.
+            משימה (מגננות מונמכות):
+            אנו מחפשים להיכנס לעסקאות גם אם רמת הוודאות אינה מושלמת. 
+            אם יש לפחות אינדיקציה *קלה* או קשר *סביר* בחדשות שתומך בשוק, או שההימור נראה עם פוטנציאל - החלט BUY.
+            רק אם החדשות *ממש* סותרות ואין שום היגיון בעסקה - החלט SKIP.
             
             ענה בפורמט:
             החלטה: [BUY/SKIP]
-            הסבר: [קישור קצר בין כותרת ספציפית לשוק]
+            הסבר: [הסבר קצר ותכליתי מדוע אישרת/פסלת]
             """
             
             analysis = analyze_with_groq(prompt)
@@ -182,8 +183,7 @@ async def analyze_and_trade():
             if "BUY" in analysis.upper():
                 print(f"🎯 זיהוי הזדמנות עבור: {question}")
                 
-                # התיקון: שליחת הפקודה ושמירה במסד הנתונים
-                size_to_buy = "10" # כמות מניות לקנייה (10 מניות)
+                size_to_buy = "10" 
                 success, order_id_or_err = execute_poly_order(token_id, price, size=size_to_buy, side="BUY")
                 
                 if success:
@@ -200,7 +200,7 @@ async def analyze_and_trade():
                         
                     await tg_bot.send_message(
                         chat_id=CHAT_ID, 
-                        text=f"🎯 *הימור חדש בוצע (PolyBot)!*\n\n"
+                        text=f"🎯 *הימור חדש בוצע (PolyBot V2.1)!*\n\n"
                              f"📌 **שוק:** {question}\n"
                              f"💵 **מחיר קנייה:** {price*100:.1f}¢\n"
                              f"📦 **כמות מניות:** {size_to_buy}\n"
@@ -235,7 +235,7 @@ async def handle_telegram_updates():
                     await update.message.reply_text("ברוך הבא ל-PolyBot! השתמש בלחצנים למטה:", reply_markup=reply_markup)
                     
         except Exception as e:
-            pass # התעלמות משגיאות קטנות ברשת
+            pass 
         
         await asyncio.sleep(2)
 
@@ -250,7 +250,7 @@ async def main():
     from telegram import ReplyKeyboardMarkup
     keyboard = [['📊 דוח סטטוס פולי', '🔄 סרוק עכשיו']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.0 מוכן לפעולה!", reply_markup=reply_markup)
+    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.1 (Aggressive Mode) מוכן לפעולה!", reply_markup=reply_markup)
     
     asyncio.create_task(handle_telegram_updates())
     
