@@ -139,15 +139,31 @@ def analyze_with_groq(prompt):
 # 🎯 לוגיקת מחירים ונזילות מתוקנת
 # ==========================================
 def get_correct_prices(market_data):
-    tokens = market_data.get('tokens', [])
-    outcome_prices = market_data.get('outcome_prices', [0, 0])
-    if len(outcome_prices) >= 2:
-        yes_price = float(outcome_prices[0])
-        no_price = float(outcome_prices[1])
-    else:
-        yes_price, no_price = 0.5, 0.5
-    if abs((yes_price + no_price) - 1.0) > 0.01:
-        print(f"⚠️ מחירים לא תקינים: YES={yes_price}, NO={no_price}")
+    """חילוץ חכם של מחירים מפולימרקט, ללא הצפת לוגים"""
+    yes_price, no_price = 0.0, 0.0
+    
+    # ניסיון 1: חיפוש רגיל ב-outcome_prices
+    outcome_prices = market_data.get('outcome_prices')
+    if outcome_prices and len(outcome_prices) >= 2:
+        try:
+            yes_price = float(outcome_prices[0])
+            no_price = float(outcome_prices[1])
+        except: pass
+        
+    # ניסיון 2: חיפוש עמוק בתוך רשימת ה-tokens
+    if yes_price == 0.0 and no_price == 0.0:
+        tokens = market_data.get('tokens', [])
+        if len(tokens) >= 2:
+            try:
+                yes_price = float(tokens[0].get('price', 0))
+                no_price = float(tokens[1].get('price', 0))
+            except: pass
+            
+    # אם המחירים סוכמים למשהו מאוד חריג (לא הגיוני מתמטית), נחזיר 0
+    if yes_price > 0 and no_price > 0:
+        if abs((yes_price + no_price) - 1.0) > 0.1:
+            return 0.0, 0.0
+            
     return yes_price, no_price
 
 def calculate_position_size(balance, confidence_score, market_volatility=1.0):
@@ -325,6 +341,11 @@ async def analyze_and_trade():
         
         yes_price, no_price = get_correct_prices(event)
         price = yes_price
+        
+        # 🔥 התיקון: מדלגים בשקט לחלוטין על שווקים "מתים" או פתורים
+        if price <= 0.0 or price >= 1.0:
+            continue
+            
         side = "BUY"
         
         prompt = f"""אתה אנליסט פולימרקט מקצועי.
