@@ -109,22 +109,22 @@ def run_dummy_server():
         httpd.serve_forever()
 
 def get_global_news_flash():
-    """סריקת חדשות פיננסיות וקריפטו בלבד (הכנה לצלף)"""
+    """סריקת חדשות: קריפטו, שוק ההון ופוליטיקה"""
     sources = [
-        "https://cointelegraph.com/rss",          # קריפטו וביטקוין
-        "https://cryptoslate.com/feed/",          # קריפטו
+        "https://cointelegraph.com/rss",          # קריפטו
         "https://www.cnbc.com/id/10000664/device/rss/rss.html", # פיננסים ומניות
         "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml", # וול סטריט ג'ורנל
+        "https://www.reutersagency.com/feed/?best-topics=political-news" # פוליטיקה (רויטרס)
     ]
     all_headlines = []
     for url in sources:
         try:
             feed = feedparser.parse(url)
-            # ניקח 2 כותרות מכל מקור כדי לקבל תמונה רחבה על הכלכלה
-            for entry in feed.entries[:2]:
+            # ניקח 3 כותרות מכל מקור כדי לקבל כיסוי מודיעיני רחב יותר
+            for entry in feed.entries[:3]:
                 all_headlines.append(f"- {entry.title}")
         except: continue
-    return "\n".join(all_headlines) if all_headlines else "No fresh financial news."
+    return "\n".join(all_headlines) if all_headlines else "No fresh news."
 
 # ==========================================
 # 🧠 המוח של פולימרקט (שוחזר)
@@ -326,7 +326,7 @@ async def send_live_dashboard():
 # 🧠 ניתוח ראשית (שילוב לוגיקה)
 # ==========================================
 async def analyze_and_trade():
-    """מנוע צלף: מתביית רק על שווקי קריפטו ומאקרו-כלכלה"""
+    """מנוע צלף: קריפטו, מאקרו-כלכלה ופוליטיקה"""
     today = datetime.now().date().isoformat()
     res_today = supabase.table("poly_trades1").select("*").gte("created_at", today).execute()
     if len(res_today.data) >= RiskConfig.MAX_DAILY_TRADES: return
@@ -335,45 +335,46 @@ async def analyze_and_trade():
     balance = get_balance()
     
     try:
-        # סורקים 100 שווקים כדי שיהיה ממה לסנן
         response = requests.get("https://clob.polymarket.com/markets", params={"active": "true", "limit": 100}).json()
         events = response.get('data', [])
     except: return
     
-    # הראדאר: הבוט יחפש רק שאלות עם המילים האלו
+    # הראדאר: עכשיו כולל גם מונחים פוליטיים חמים
     target_keywords = [
+        # קריפטו ומאקרו
         "bitcoin", "btc", "s&p", "spx", "nasdaq", "dow", 
-        "fed", "interest rate", "inflation", "stock", "recession", "etf"
+        "fed", "interest rate", "inflation", "stock", "recession", "etf",
+        # פוליטיקה
+        "election", "president", "trump", "biden", "harris", "democrat", "republican", 
+        "senate", "congress", "vote", "politics", "white house", "court"
     ]
     
     for event in events:
         question = event.get('question')
         if not question: continue
         
-        # סינון ה"צלף" - האם השוק קשור לביטקוין או למניות?
         question_lower = question.lower()
         if not any(keyword in question_lower for keyword in target_keywords):
-            continue # השוק לא מעניין אותנו, מדלגים בשקט
+            continue 
             
         yes_price, no_price = get_correct_prices(event)
         price = yes_price
         
-        # סינון שווקים מתים
         if price <= 0.0 or price >= 1.0:
             continue
             
         side = "BUY"
         
-        prompt = f"""אתה אנליסט מאקרו-כלכלה וקריפטו בכיר בוול סטריט.
-        אתה מחפש הזדמנויות הימור בשווקי פולימרקט שקשורים אך ורק לביטקוין ולשוק ההון.
+        prompt = f"""אתה אנליסט בכיר לקריפטו, מאקרו-כלכלה ופוליטיקה אמריקאית/עולמית.
+        אתה מחפש הזדמנויות הימור בשווקי פולימרקט שקשורים לנושאים האלו בלבד.
         
-        חדשות כלכליות מהשעות האחרונות:
+        חדשות מהשעות האחרונות:
         {current_news[:800]}
         
         השוק הנבדק כעת: {question}
         מחיר (הסתברות נוכחית שזה יקרה): {price*100:.1f}%
         
-        האם החדשות הכלכליות תומכות בסבירות שהאירוע הזה יקרה?
+        האם החדשות תומכות בסבירות שהאירוע הזה יקרה?
         החלטה: [BUY/SKIP]
         ביטחון: [1-10]
         הסבר: [משפט קצר ומקצועי]"""
@@ -383,7 +384,6 @@ async def analyze_and_trade():
             conf = extract_confidence_from_analysis(analysis)
             ev = calculate_ev(price, conf / 10)
             
-            # כניסה לעסקה אם התוחלת חיובית
             if ev > 0.05:
                 await execute_trade_with_risk_management(event['tokens'][0]['token_id'], question, price, side, conf, balance)
 
