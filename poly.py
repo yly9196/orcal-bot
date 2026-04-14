@@ -170,21 +170,65 @@ async def analyze_and_trade():
                 else:
                     print(f"❌ שגיאת ביצוע עבור {question}: {result}")
 
+async def handle_telegram_updates():
+    """מאזין לפקודות מהטלגרם ומגיב ללחצנים"""
+    last_update_id = 0
+    print("📡 PolyBot Telegram Listener Started...")
+    
+    # הגדרת הלחצנים שיופיעו בטלגרם
+    from telegram import ReplyKeyboardMarkup
+    keyboard = [['📊 דוח סטטוס פולי', '🔄 סרוק עכשיו']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    while True:
+        try:
+            updates = await tg_bot.get_updates(offset=last_update_id, timeout=10)
+            for update in updates:
+                last_update_id = update.update_id + 1
+                if not update.message: continue
+                
+                text = update.message.text
+                if text == '📊 דוח סטטוס פולי':
+                    await send_hourly_summary()
+                elif text == '🔄 סרוק עכשיו':
+                    await update.message.reply_text("🔎 מריץ סריקה ידנית עכשיו...")
+                    await analyze_and_trade()
+                elif text == '/start':
+                    await update.message.reply_text("ברוך הבא ל-PolyBot! השתמש בלחצנים למטה:", reply_markup=reply_markup)
+                    
+        except Exception as e:
+            print(f"Telegram Listener Error: {e}")
+        
+        await asyncio.sleep(2)
+
 # ==========================================
 # 🚀 הלולאה הראשית
 # ==========================================
 async def main():
     global last_summary_hour
+    
+    # הפעלת השרת המדומה
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.0 (Groq Llama-3 + L2 Live) באוויר!")
+    
+    # הודעת הדלקה עם מקלדת כפתורים
+    from telegram import ReplyKeyboardMarkup
+    keyboard = [['📊 דוח סטטוס פולי', '🔄 סרוק עכשיו']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.0 מוכן לפעולה!", reply_markup=reply_markup)
+    
+    # הפעלת המאזין לטלגרם כמשימה נפרדת (Task)
+    asyncio.create_task(handle_telegram_updates())
     
     while True:
         try:
             now = datetime.now(israel_tz)
+            
+            # 1. בדיקת דוח שעתי אוטומטי
             if now.minute == 0 and now.hour != last_summary_hour:
                 await send_hourly_summary()
                 last_summary_hour = now.hour
                 
+            # 2. סריקה אוטומטית (כל 10 דקות)
             if now.minute % 10 == 0:
                 await analyze_and_trade()
                 
@@ -194,6 +238,9 @@ async def main():
         await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except KeyboardInterrupt: print("Bot stopped.")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped.")
+
 
