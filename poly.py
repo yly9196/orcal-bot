@@ -11,6 +11,7 @@ from telegram import Bot
 from supabase import create_client
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
+import feedparser
 
 # ==========================================
 # 🌐 הגדרות L2 של פולימרקט
@@ -66,13 +67,10 @@ def get_global_news_flash():
         try:
             feed = feedparser.parse(url)
             if feed.entries:
-                # לוקח את הכותרת הראשונה מכל מקור
                 all_headlines.append(f"- {feed.entries[0].title}")
         except: continue
     
     return "\n".join(all_headlines) if all_headlines else "No fresh news found."
-
-# כאן יבואו שאר הפונקציות שלך כמו get_recent_history וכו'
 
 # ==========================================
 # ⚙️ שרת מדומה ומערכות עזר
@@ -139,7 +137,6 @@ async def analyze_and_trade():
     now_str = datetime.now(israel_tz).strftime('%H:%M:%S')
     print(f"🔎 [{now_str}] סורק שווקים ומצליב עם 10 מקורות חדשות...")
     
-    # 1. איסוף חדשות מכל המקורות
     current_news = get_global_news_flash()
     history_context = get_recent_history()
     
@@ -159,7 +156,6 @@ async def analyze_and_trade():
         price = float(prices[0]) if prices else 0
 
         if question and price > 0:
-            # 2. ה-Prompt החדש שכולל את כל החדשות מהעולם
             prompt = f"""
             אתה אנליסט פולימרקט בכיר.
             
@@ -184,17 +180,40 @@ async def analyze_and_trade():
             analysis = analyze_with_groq(prompt)
             
             if "BUY" in analysis.upper():
-                # ביצוע העסקה (כאן נכנסת לוגיקת ה-execute_poly_order)
-                # ... (שאר הקוד של הביצוע נשאר אותו דבר)
                 print(f"🎯 זיהוי הזדמנות עבור: {question}")
-                # (כאן הבוט יבצע את הפקודה כפי שהגדרנו קודם)
+                
+                # התיקון: שליחת הפקודה ושמירה במסד הנתונים
+                size_to_buy = "10" # כמות מניות לקנייה (10 מניות)
+                success, order_id_or_err = execute_poly_order(token_id, price, size=size_to_buy, side="BUY")
+                
+                if success:
+                    try:
+                        supabase.table("poly_trades1").insert({
+                            "question": question,
+                            "buy_price": price,
+                            "size": float(size_to_buy),
+                            "status": "OPEN",
+                            "analysis_reason": analysis
+                        }).execute()
+                    except Exception as db_err:
+                        print(f"DB Error: {db_err}")
+                        
+                    await tg_bot.send_message(
+                        chat_id=CHAT_ID, 
+                        text=f"🎯 *הימור חדש בוצע (PolyBot)!*\n\n"
+                             f"📌 **שוק:** {question}\n"
+                             f"💵 **מחיר קנייה:** {price*100:.1f}¢\n"
+                             f"📦 **כמות מניות:** {size_to_buy}\n"
+                             f"🧠 **סיבת ה-AI:**\n{analysis}",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    print(f"❌ שגיאה בביצוע פקודה לפולימרקט: {order_id_or_err}")
 
 async def handle_telegram_updates():
-    """מאזין לפקודות מהטלגרם ומגיב ללחצנים"""
     last_update_id = 0
     print("📡 PolyBot Telegram Listener Started...")
     
-    # הגדרת הלחצנים שיופיעו בטלגרם
     from telegram import ReplyKeyboardMarkup
     keyboard = [['📊 דוח סטטוס פולי', '🔄 סרוק עכשיו']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -216,7 +235,7 @@ async def handle_telegram_updates():
                     await update.message.reply_text("ברוך הבא ל-PolyBot! השתמש בלחצנים למטה:", reply_markup=reply_markup)
                     
         except Exception as e:
-            print(f"Telegram Listener Error: {e}")
+            pass # התעלמות משגיאות קטנות ברשת
         
         await asyncio.sleep(2)
 
@@ -226,28 +245,23 @@ async def handle_telegram_updates():
 async def main():
     global last_summary_hour
     
-    # הפעלת השרת המדומה
     threading.Thread(target=run_dummy_server, daemon=True).start()
     
-    # הודעת הדלקה עם מקלדת כפתורים
     from telegram import ReplyKeyboardMarkup
     keyboard = [['📊 דוח סטטוס פולי', '🔄 סרוק עכשיו']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await tg_bot.send_message(chat_id=CHAT_ID, text="🧠 PolyBot V2.0 מוכן לפעולה!", reply_markup=reply_markup)
     
-    # הפעלת המאזין לטלגרם כמשימה נפרדת (Task)
     asyncio.create_task(handle_telegram_updates())
     
     while True:
         try:
             now = datetime.now(israel_tz)
             
-            # 1. בדיקת דוח שעתי אוטומטי
             if now.minute == 0 and now.hour != last_summary_hour:
                 await send_hourly_summary()
                 last_summary_hour = now.hour
                 
-            # 2. סריקה אוטומטית (כל 10 דקות)
             if now.minute % 10 == 0:
                 await analyze_and_trade()
                 
@@ -261,5 +275,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Bot stopped.")
-
 
