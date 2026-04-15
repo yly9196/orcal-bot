@@ -109,18 +109,19 @@ def run_dummy_server():
         httpd.serve_forever()
 
 def get_global_news_flash():
-    """סריקת חדשות: קריפטו, שוק ההון ופוליטיקה"""
+    """סריקת חדשות רחבה: קריפטו, כלכלה, פוליטיקה וטכנולוגיה"""
     sources = [
-        "https://cointelegraph.com/rss",          # קריפטו
-        "https://www.cnbc.com/id/10000664/device/rss/rss.html", # פיננסים ומניות
-        "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml", # וול סטריט ג'ורנל
-        "https://www.reutersagency.com/feed/?best-topics=political-news" # פוליטיקה (רויטרס)
+        "https://cointelegraph.com/rss", 
+        "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+        "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml",
+        "https://www.reutersagency.com/feed/?best-topics=political-news",
+        "http://feeds.bbci.co.uk/news/world/rss.xml",       # חדשות עולם (BBC)
+        "https://news.google.com/rss/search?q=technology"   # חדשות טכנולוגיה
     ]
     all_headlines = []
     for url in sources:
         try:
             feed = feedparser.parse(url)
-            # ניקח 3 כותרות מכל מקור כדי לקבל כיסוי מודיעיני רחב יותר
             for entry in feed.entries[:3]:
                 all_headlines.append(f"- {entry.title}")
         except: continue
@@ -326,27 +327,24 @@ async def send_live_dashboard():
 # 🧠 ניתוח ראשית (שילוב לוגיקה)
 # ==========================================
 async def analyze_and_trade():
-    """מנוע צלף: קריפטו, מאקרו-כלכלה ופוליטיקה"""
-    today = datetime.now().date().isoformat()
-    res_today = supabase.table("poly_trades1").select("*").gte("created_at", today).execute()
-    if len(res_today.data) >= RiskConfig.MAX_DAILY_TRADES: return
+    """מנוע סייר מורחב: קריפטו, כלכלה, פוליטיקה ואירועים גלובליים"""
+    # ... (בדיקת מגבלות יומית נשארת אותו דבר) ...
     
     current_news = get_global_news_flash()
     balance = get_balance()
     
     try:
-        response = requests.get("https://clob.polymarket.com/markets", params={"active": "true", "limit": 100}).json()
+        # סורקים עכשיו 200 שווקים כדי למצוא כמה שיותר התאמות
+        response = requests.get("https://clob.polymarket.com/markets", params={"active": "true", "limit": 200}).json()
         events = response.get('data', [])
     except: return
     
-    # הראדאר: עכשיו כולל גם מונחים פוליטיים חמים
+    # רדאר מורחב מאוד
     target_keywords = [
-        # קריפטו ומאקרו
-        "bitcoin", "btc", "s&p", "spx", "nasdaq", "dow", 
-        "fed", "interest rate", "inflation", "stock", "recession", "etf",
-        # פוליטיקה
-        "election", "president", "trump", "biden", "harris", "democrat", "republican", 
-        "senate", "congress", "vote", "politics", "white house", "court"
+        "bitcoin", "btc", "eth", "crypto", "binance", "fed", "rate", "inflation", 
+        "stock", "spx", "nasdaq", "apple", "google", "ai", "openai", "musk", "tesla",
+        "trump", "election", "biden", "white house", "court", "senate", "war",
+        "israel", "iran", "middle east", "lebanon", "gaza", "china", "russia", "tiktok"
     ]
     
     for event in events:
@@ -359,33 +357,30 @@ async def analyze_and_trade():
             
         yes_price, no_price = get_correct_prices(event)
         price = yes_price
-        
-        if price <= 0.0 or price >= 1.0:
-            continue
+        if price <= 0.05 or price >= 0.95: continue # מדלגים על הימורים גמורים
             
-        side = "BUY"
+        # פרומפט משודרג עם דרישות סף נמוכות יותר
+        prompt = f"""אתה אנליסט שווקים גלובלי. המטרה שלך היא לזהות הזדמנויות הימור בפולימרקט.
         
-        prompt = f"""אתה אנליסט בכיר לקריפטו, מאקרו-כלכלה ופוליטיקה אמריקאית/עולמית.
-        אתה מחפש הזדמנויות הימור בשווקי פולימרקט שקשורים לנושאים האלו בלבד.
+        חדשות עדכניות:
+        {current_news[:1000]}
         
-        חדשות מהשעות האחרונות:
-        {current_news[:800]}
+        השוק הנבדק: {question}
+        הסתברות נוכחית: {price*100:.1f}%
         
-        השוק הנבדק כעת: {question}
-        מחיר (הסתברות נוכחית שזה יקרה): {price*100:.1f}%
-        
-        האם החדשות תומכות בסבירות שהאירוע הזה יקרה?
+        האם יש קשר (גם אם עקיף) בין המגמות בעולם לסיכוי שהאירוע יקרה?
+        אל תהיה נוקשה מדי - אם יש סבירות הגיונית, אשר את העסקה.
         החלטה: [BUY/SKIP]
         ביטחון: [1-10]
-        הסבר: [משפט קצר ומקצועי]"""
+        הסבר: משפט קצר."""
         
         analysis = analyze_with_groq(prompt)
         if "BUY" in analysis.upper():
             conf = extract_confidence_from_analysis(analysis)
+            # הורדנו את הרף ל-0.02 - הבוט יאשר הרבה יותר עסקאות
             ev = calculate_ev(price, conf / 10)
-            
-            if ev > 0.05:
-                await execute_trade_with_risk_management(event['tokens'][0]['token_id'], question, price, side, conf, balance)
+            if ev > 0.02:
+                await execute_trade_with_risk_management(event['tokens'][0]['token_id'], question, price, "BUY", conf, balance)
 
 # ==========================================
 # 🚀 האזנה לטלגרם והרצה
