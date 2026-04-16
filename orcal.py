@@ -1,65 +1,123 @@
 import os
+import time
 import pandas as pd
 import numpy as np
 from flask import Flask, jsonify, request
 from binance.client import Client
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
 
 app = Flask(__name__)
 
-# אנחנו לא צריכים מפתחות API שלמים כי אנחנו שואבים רק נתונים ציבוריים מהגרפים!
+# התחברות בסיסית לבינאנס (ללא מפתחות - קריאת נתונים ציבוריים בלבד)
 binance_client = Client()
 
-# סיסמה מאובטחת כדי שרק הבוט שלך יוכל לדבר עם האורקל
+# סיסמת האבטחה
 ORACLE_SECRET = os.getenv("ORACLE_SECRET", "ApexQuant2026")
 
-def get_historical_data(symbol, limit=1000):
-    """שואב היסטוריה ובנה פיצ'רים ללמידת מכונה"""
-    klines = binance_client.futures_klines(symbol=symbol, interval='15m', limit=limit)
-    df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'])
-    df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+# 🧠 הזיכרון של האורקל (Model Cache)
+# פה השרת שומר מודלים מאומנים כדי לא לאמן אותם מחדש כל שנייה. מתאפס כל 6 שעות.
+model_cache = {}
+CACHE_DURATION_SECONDS = 3600 * 6 
+
+def add_technical_features(df):
+    """חישוב אינדיקטורים מתקדמים למודל ה-Machine Learning"""
+    # חישוב RSI
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi_14'] = 100 - (100 / (1 + rs))
     
-    # יצירת "פיצ'רים" למודל (RSI בסיסי, שינויי מחיר, ושינויי ווליום)
+    # חישוב ממוצעים נעים והמרחק מהם (חשוב לזיהוי חזרות לממוצע - Mean Reversion)
+    df['sma_20'] = df['close'].rolling(window=20).mean()
+    df['dist_sma_20'] = (df['close'] - df['sma_20']) / df['sma_20']
+    
+    # חישוב תנודתיות (אחוזי שינוי)
     df['returns'] = df['close'].pct_change()
     df['vol_change'] = df['volume'].pct_change()
     
-    # תווית המטרה (Target): האם הנר *הבא* היה ירוק? (1 = כן, 0 = לא)
+    return df
+
+def get_historical_data_with_btc(symbol, limit=1000):
+    """שאיבת היסטוריה של המטבע + שילוב הנתונים של ביטקוין להבנת מצב השוק הגלובלי"""
+    
+    # 1. שאיבת נתוני המטבע המבוקש
+    klines = binance_client.futures_klines(symbol=symbol, interval='15m', limit=limit)
+    df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'tbv', 'tqv', 'ignore'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    
+    df = add_technical_features(df)
+    
+    # 2. הוספת "אפקט הביטקוין" (BTC Factor)
+    if symbol != 'BTCUSDT':
+        btc_klines = binance_client.futures_klines(symbol='BTCUSDT', interval='15m', limit=limit)
+        btc_df = pd.DataFrame(btc_klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'tbv', 'tqv', 'ignore'])
+        btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'], unit='ms')
+        btc_df.set_index('timestamp', inplace=True)
+        btc_df['btc_returns'] = btc_df['close'].astype(float).pct_change()
+        
+        # חיבור טבלת הביטקוין לטבלת המטבע שלנו
+        df = df.join(btc_df[['btc_returns']], how='left')
+    else:
+        # אם המטבע הוא ביטקוין, המגמה הגלובלית היא המגמה שלו
+        df['btc_returns'] = df['returns'] 
+        
+    # 3. תווית המטרה (Target): האם הנר הבא היה ירוק?
     df['target'] = (df['returns'].shift(-1) > 0).astype(int)
     
+    # ניקוי שורות ריקות שנוצרו מהחישובים
     df.dropna(inplace=True)
     return df
 
 def train_and_predict(symbol):
-    """מאמן את המודל ומחזיר הסתברות"""
-    df = get_historical_data(symbol)
+    """המוח המרכזי: מאמן מודל או שולף מודל מהזיכרון כדי לתת תחזית מיידית"""
+    current_time = time.time()
+    features = ['returns', 'vol_change', 'rsi_14', 'dist_sma_20', 'btc_returns']
     
-    # הנתונים שהמודל יסתכל עליהם (X) והתשובה שהוא מנסה לחזות (y)
-    features = ['returns', 'vol_change', 'open', 'high', 'low', 'close', 'volume']
+    # ⚡ בדיקת הזיכרון (Cache): האם כבר אימנו מודל למטבע הזה ב-6 השעות האחרונות?
+    if symbol in model_cache and (current_time - model_cache[symbol]['last_trained']) < CACHE_DURATION_SECONDS:
+        model = model_cache[symbol]['model']
+        
+        # אנחנו צריכים רק את הנרות האחרונים כדי לדעת מה קורה עכשיו (חיסכון עצום בזמן)
+        df_latest = get_historical_data_with_btc(symbol, limit=100) 
+        
+        # שים לב לסוגריים הכפולים כדי למנוע את הודעת השגיאה (UserWarning)
+        latest_data = df_latest[features].iloc[[-1]] 
+        
+        probabilities = model.predict_proba(latest_data)[0]
+        return probabilities[1], probabilities[0]
+
+    # 🐌 אם הגענו לפה, המודל לא בזיכרון או שהוא ישן. מאמנים מחדש על היסטוריה עמוקה.
+    df = get_historical_data_with_btc(symbol, limit=1000)
+    
     X = df[features]
     y = df['target']
     
-    # בניית מודל למידת המכונה (Random Forest)
+    # אימון יער אקראי (Random Forest)
     model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
-    model.fit(X, y) # אימון המודל על כל ההיסטוריה!
+    model.fit(X, y)
     
-    # לוקחים את הנתונים של הרגע הזה ממש כדי לחזות את העתיד הקרוב
+    # שמירת המודל לזיכרון של השרת כדי שבפעם הבאה זה יהיה מהיר יותר
+    model_cache[symbol] = {
+        'model': model,
+        'last_trained': current_time,
+        'features': features
+    }
+    
     latest_data = X.iloc[[-1]]
-
-    # חישוב הסתברות
     probabilities = model.predict_proba(latest_data)[0]
-    prob_down = probabilities[0]
-    prob_up = probabilities[1]
     
-    return prob_up, prob_down
+    return probabilities[1], probabilities[0]
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "Apex Oracle is Online 🧠"}), 200
+    return jsonify({"status": "Apex Oracle V2 (Senior Quant) is Online 🧠"}), 200
 
 @app.route('/ask_oracle', methods=['GET'])
 def ask_oracle():
-    """הנקודה שאליה הבוט הראשי יפנה כדי לקבל תחזית"""
+    """נקודת הקצה (Endpoint) שאליה הבוט הראשי פונה"""
     provided_secret = request.args.get('secret')
     if provided_secret != ORACLE_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
@@ -71,12 +129,19 @@ def ask_oracle():
     try:
         prob_up, prob_down = train_and_predict(symbol)
         
-        # מחזירים לבוט הראשי תשובה מסודרת
+        # ייצור המלצה - נדרוש לפחות 55% ביטחון כדי לאשר עסקה
+        recommendation = "HOLD"
+        if prob_up > 0.55:
+            recommendation = "BUY"
+        elif prob_down > 0.55:
+            recommendation = "SELL"
+            
         return jsonify({
             "symbol": symbol,
             "probability_UP": round(prob_up * 100, 2),
             "probability_DOWN": round(prob_down * 100, 2),
-            "recommendation": "BUY" if prob_up > 0.60 else "SELL" if prob_down > 0.60 else "HOLD"
+            "recommendation": recommendation,
+            "cached": (symbol in model_cache) # אינדיקציה האם זה נשלף מהזיכרון
         }), 200
         
     except Exception as e:
