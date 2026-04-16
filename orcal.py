@@ -44,8 +44,8 @@ def train_and_predict(symbol):
     model.fit(X, y) # אימון המודל על כל ההיסטוריה!
     
     # לוקחים את הנתונים של הרגע הזה ממש כדי לחזות את העתיד הקרוב
-    latest_data = X.iloc[-1].values.reshape(1, -1)
-    
+    latest_data = X.iloc[[-1]]
+
     # חישוב הסתברות
     probabilities = model.predict_proba(latest_data)[0]
     prob_down = probabilities[0]
