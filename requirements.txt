@@ -1,9 +1,5 @@
-python-telegram-bot
-supabase
-py-clob-client
-feedparser
-pytz
-cryptography
-requests
-aiohttp
+flask
 pandas
+numpy
+scikit-learn
+python-binance
