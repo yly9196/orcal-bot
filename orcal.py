@@ -5,14 +5,17 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from sklearn.ensemble import GradientBoostingClassifier
 from binance.client import Client
+import time
 import warnings
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 CORS(app)
-
-# התחברות לבינאנס למשיכת נתוני שוק
 client = Client()
+
+# --- מערכת הזיכרון (Cache) של קרן הגידור ---
+model_cache = {}
+CACHE_TIME_LIMIT = 15 * 60  # 15 דקות בשניות
 
 def get_market_data(symbol="BTCUSDT", interval="1h", limit=200):
     try:
@@ -28,15 +31,12 @@ def get_market_data(symbol="BTCUSDT", interval="1h", limit=200):
         return None
 
 def prepare_features(df):
-    # חישוב אינדיקטורים עבור מודל ה-AI - שדרוג לרמת קרן גידור
     df['returns'] = df['close'].pct_change()
     df['range'] = (df['high'] - df['low']) / df['close']
     df['vol_change'] = df['volume'].pct_change()
     df['rsi'] = ta.rsi(df['close'], length=14)
     df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
-    
-    # חיזוי מגמה: 1 לעלייה, 0 לירידה (דורשים לפחות עלייה קלה כדי לסנן רעשים)
     df['target'] = (df['returns'].shift(-1) > 0.001).astype(int)
     
     df.dropna(inplace=True)
@@ -45,19 +45,28 @@ def prepare_features(df):
 
 @app.route('/ask_oracle', methods=['GET'])
 def ask_oracle():
+    global model_cache
     symbol = request.args.get('symbol', 'BTCUSDT')
-    df = get_market_data(symbol=symbol)
+    current_time = time.time()
     
+    df = get_market_data(symbol=symbol)
     if df is None or len(df) < 50:
         return jsonify({"prediction": 0, "status": "error", "msg": "not enough data"})
 
     X, y = prepare_features(df)
-    
-    # הרצת מודל מתקדם (Gradient Boosting)
-    model = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3)
-    model.fit(X[:-1], y[:-1])
-    
     last_features = X.tail(1)
+    
+    # בדיקה האם המודל קיים בזיכרון והאם עברו פחות מ-15 דקות
+    if symbol in model_cache and (current_time - model_cache[symbol]['time']) < CACHE_TIME_LIMIT:
+        model = model_cache[symbol]['model']
+        # שימוש במודל הקיים לחיזוי מהיר
+    else:
+        # אימון מחדש (קורה רק פעם ב-15 דקות לכל מטבע)
+        print(f"[{symbol}] Training new AI model (15m interval)...")
+        model = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3)
+        model.fit(X[:-1], y[:-1])
+        model_cache[symbol] = {'model': model, 'time': current_time}
+    
     prediction = int(model.predict(last_features)[0])
     confidence = float(np.max(model.predict_proba(last_features)))
     
@@ -66,13 +75,9 @@ def ask_oracle():
         "prediction": prediction,
         "confidence": confidence,
         "market_strength": float(last_features['adx'].values[0]),
-        "version": "Ultra-Pro-V43-OracleCloud"
+        "version": "Ultra-Pro-V44-Cached"
     })
 
-@app.route('/')
-def home():
-    return "Oracle AI Server Ultra Pro is Running on Port 10000!"
-
 if __name__ == '__main__':
-    # שומרים על פורט 10000 בדיוק כמו שביקשת
     app.run(host='0.0.0.0', port=10000)
+
